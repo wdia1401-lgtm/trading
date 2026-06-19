@@ -1,0 +1,242 @@
+//@version=6
+// =============================================================================
+//  YM INITIAL BALANCE PLAYBOOK  — strategy implementation
+//  Source: edgeful "full IB playbook on YM" (5 rules, 128 NY sessions,
+//          12/08/25 – 06/08/26). For educational purposes only.
+//
+//  Designed for:  YM (E-mini Dow) futures, 5-minute chart, NY session.
+//  IB = first hour, 09:30–10:30 ET. Breakouts measured on a wick touch.
+//
+//  The playbook's edge is knowing the likely break direction AT 10:30, before
+//  the break happens, then letting the clock (Rule 3) and the extension levels
+//  (Rules 4–5) decide whether to hold to the bell or scalp.
+//
+//  Rule map (see README):
+//   R1  10:30 direction trigger  -> which side breaks first  (entry signal)
+//   R2  day color                -> green/red day            (runner-hold)
+//   R3  the clock                -> early break holds, late break fades (filter)
+//   R4  extension targets        -> how far it travels        (profit target)
+//   R5  close location           -> hold-vs-scalp decision    (trade mgmt)
+// =============================================================================
+
+strategy("YM Initial Balance Playbook", "YM IB Playbook", overlay=true,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=25000, pyramiding=0, calc_on_every_tick=false,
+     commission_type=strategy.commission.cash_per_order, commission_value=2.0,
+     slippage=1)
+
+// ------------------------------- Inputs --------------------------------------
+grpSess  = "Session / Initial Balance"
+ibSess   = input.session("0930-1030", "IB window (first hour)", group=grpSess)
+rthSess  = input.session("0930-1600", "Regular session", group=grpSess)
+tz       = input.string("America/New_York", "Exchange timezone", group=grpSess)
+noonHour = input.int(12, "Clock filter — no new breakouts at/after this hour (R3)", minval=0, maxval=23, group=grpSess)
+pmHour   = input.int(14, "Afternoon scalp hour — flatten if no extension (R5)", minval=0, maxval=23, group=grpSess)
+
+grpSetup     = "Setup filters"
+entryMode    = input.string("Anticipation (Rule 1)", "Entry mode", options=["Anticipation (Rule 1)", "Breakout (Rule 2/3)"], group=grpSetup)
+tradeLongs   = input.bool(true,  "Trade long trigger  1A (low formed first + top-quartile close)", group=grpSetup)
+tradeShorts  = input.bool(true,  "Trade short trigger 1B (high formed first + bottom-quartile close)", group=grpSetup)
+quartile     = input.float(0.25, "Close-in-range quartile (top/bottom)", minval=0.05, maxval=0.50, step=0.05, group=grpSetup)
+skipRotation = input.bool(true,  "Skip rotation days (huge IB) — Rule 4C", group=grpSetup)
+
+grpSize  = "IB size thresholds (% of price)"
+smallPct = input.float(0.47, "Small IB below %  (Rule 4A)", step=0.01, group=grpSize)
+largePct = input.float(0.70, "Large IB above %  (Rule 2A/2B)", step=0.01, group=grpSize)
+hugePct  = input.float(0.90, "Huge / rotation IB above %  (Rule 4C)", step=0.01, group=grpSize)
+
+grpMgmt         = "Trade management"
+adaptiveTargets = input.bool(true, "Adaptive target: small IB -> 0.5x, else 1.0x (R4)", group=grpMgmt)
+targetMult      = input.float(1.0, "Fixed target extension (x IB range) when not adaptive", step=0.1, group=grpMgmt)
+ext05Mult       = input.float(0.5, "First extension level (x IB range)", step=0.1, group=grpMgmt)
+holdRunners     = input.bool(true, "Hold runner days to the bell (Rule 2B/2C)", group=grpMgmt)
+scalpNoExt      = input.bool(true, "Scalp out in PM if extension never prints (Rule 5)", group=grpMgmt)
+
+grpViz     = "Visuals"
+showLevels = input.bool(true, "Show IB & extension levels", group=grpViz)
+showTable  = input.bool(true, "Show 10:30 checklist table", group=grpViz)
+
+// --------------------------- Session detection -------------------------------
+inIB   = not na(time(timeframe.period, ibSess,  tz))
+inRTH  = not na(time(timeframe.period, rthSess, tz))
+hourNY = hour(time, tz)
+afterNoon = hourNY >= noonHour
+afterPM   = hourNY >= pmHour
+
+// ------------------------------- State ---------------------------------------
+var float ibHigh         = na
+var float ibLow          = na
+var float ibOpen         = na
+var float ibRunningClose = na
+var float ibClose        = na
+var int   ibHighT        = na
+var int   ibLowT         = na
+var bool  ibClosed       = false
+var bool  orderPlaced    = false
+var bool  ext05Hit       = false
+var bool  runnerActive   = false
+var int   sideTaken      = 0      //  1 long, -1 short, 0 none
+var float lvlStop        = na
+var float lvlTarget      = na
+var float lvlExt05       = na
+
+// ------------------- Build the Initial Balance, track order ------------------
+newDay = inIB and not inIB[1]
+if newDay
+    ibHigh         := high
+    ibLow          := low
+    ibOpen         := open
+    ibHighT        := time
+    ibLowT         := time
+    ibRunningClose := close
+    ibClose        := na
+    ibClosed       := false
+    orderPlaced    := false
+    ext05Hit       := false
+    runnerActive   := false
+    sideTaken      := 0
+    lvlStop        := na
+    lvlTarget      := na
+    lvlExt05       := na
+else if inIB
+    if high > ibHigh
+        ibHigh  := high
+        ibHighT := time
+    if low < ibLow
+        ibLow  := low
+        ibLowT := time
+    ibRunningClose := close
+
+// IB closes on the first bar after 10:30
+ibJustClosed = inIB[1] and not inIB
+if ibJustClosed and not ibClosed
+    ibClose  := ibRunningClose
+    ibClosed := true
+
+// --------------------------- Derived conditions ------------------------------
+ibRange    = ibHigh - ibLow
+ibRangePct = na(ibClose) ? na : ibRange / ibClose * 100.0
+closePos   = ibRange > 0 and not na(ibClose) ? (ibClose - ibLow) / ibRange : na
+
+lowFirst  = ibLowT < ibHighT
+highFirst = ibHighT < ibLowT
+topClose  = closePos >= (1.0 - quartile)
+botClose  = closePos <= quartile
+ibGreen   = not na(ibClose) and ibClose > ibOpen
+
+small = not na(ibRangePct) and ibRangePct < smallPct
+large = not na(ibRangePct) and ibRangePct > largePct
+huge  = not na(ibRangePct) and ibRangePct > hugePct
+
+// Rule 1 triggers (knowable at 10:30, before any break)
+longTrig  = ibClosed and lowFirst  and topClose
+shortTrig = ibClosed and highFirst and botClose
+
+// ------------------------------- Entries -------------------------------------
+rotationBlock = skipRotation and huge
+canLong       = longTrig  and tradeLongs  and not rotationBlock
+canShort      = shortTrig and tradeShorts and not rotationBlock
+anticipation  = entryMode == "Anticipation (Rule 1)"
+
+// Target sizing (Rule 4): small IB tends to reach 0.5x, larger IBs travel further
+tgtMult     = adaptiveTargets ? (small ? 0.5 : 1.0) : targetMult
+longTarget  = ibHigh + tgtMult  * ibRange
+shortTarget = ibLow  - tgtMult  * ibRange
+longExt05   = ibHigh + ext05Mult * ibRange
+shortExt05  = ibLow  - ext05Mult * ibRange
+
+fireEntry = ibJustClosed and not orderPlaced
+
+if fireEntry and canLong
+    orderPlaced  := true
+    sideTaken    := 1
+    lvlStop      := ibLow
+    lvlTarget    := longTarget
+    lvlExt05     := longExt05
+    runnerActive := ibGreen and large                  // Rule 2B runner
+    if anticipation
+        strategy.entry("Long", strategy.long)          // enter inside the IB at 10:30
+    else
+        strategy.entry("Long", strategy.long, stop=ibHigh)  // wait for the actual break
+
+if fireEntry and canShort
+    orderPlaced  := true
+    sideTaken    := -1
+    lvlStop      := ibHigh
+    lvlTarget    := shortTarget
+    lvlExt05     := shortExt05
+    runnerActive := (not ibGreen) and large            // Rule 2C red runner
+    if anticipation
+        strategy.entry("Short", strategy.short)
+    else
+        strategy.entry("Short", strategy.short, stop=ibLow)
+
+// Rule 3: late breaks fade — kill an unfilled breakout order after the noon cutoff
+if not anticipation and afterNoon and strategy.position_size == 0 and orderPlaced
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// ---------------------- Track the first extension (Rule 5) -------------------
+if strategy.position_size > 0 and high >= lvlExt05
+    ext05Hit := true
+if strategy.position_size < 0 and low <= lvlExt05
+    ext05Hit := true
+
+// ------------------------------- Exits ---------------------------------------
+// Bracket: stop on the opposite IB side (Rule 3A "statistically safe stop"),
+// limit at the extension target. Runner days drop the limit and ride to the bell.
+if strategy.position_size > 0
+    longLimit = (runnerActive and holdRunners) ? na : lvlTarget
+    strategy.exit("L-exit", from_entry="Long", stop=lvlStop, limit=longLimit)
+if strategy.position_size < 0
+    shortLimit = (runnerActive and holdRunners) ? na : lvlTarget
+    strategy.exit("S-exit", from_entry="Short", stop=lvlStop, limit=shortLimit)
+
+// Rule 5: extension never printed by the afternoon -> scalp it back inside.
+pmScalp = scalpNoExt and afterPM and not ext05Hit and not (runnerActive and holdRunners)
+// End of regular session -> flatten everything (these are day-trade setups).
+sessionEnding = inRTH[1] and not inRTH
+
+if strategy.position_size != 0
+    if sessionEnding
+        strategy.close_all(comment="EOD flat")
+    else if pmScalp
+        strategy.close_all(comment="PM scalp (no ext)")
+if sessionEnding
+    strategy.cancel_all()
+
+// ------------------------------- Visuals -------------------------------------
+showLine = showLevels and ibClosed and inRTH
+plot(showLine ? ibHigh : na,                    "IB High", color.teal,             2, plot.style_linebr)
+plot(showLine ? ibLow  : na,                    "IB Low",  color.red,              2, plot.style_linebr)
+plot(showLine ? ibHigh + ext05Mult * ibRange : na, "+0.5x", color.new(color.teal, 55), 1, plot.style_linebr)
+plot(showLine ? ibLow  - ext05Mult * ibRange : na, "-0.5x", color.new(color.red,  55), 1, plot.style_linebr)
+plot(showLine ? ibHigh + ibRange : na,          "+1.0x",   color.new(color.teal, 72), 1, plot.style_linebr)
+plot(showLine ? ibLow  - ibRange : na,          "-1.0x",   color.new(color.red,  72), 1, plot.style_linebr)
+bgcolor(inIB ? color.new(color.blue, 92) : na, title="IB window")
+
+// ----------------------------- Checklist table -------------------------------
+f_yesno(b) => b ? "yes" : "no"
+if showTable and barstate.islast
+    var table t = table.new(position.top_right, 2, 9, border_width=1, frame_width=1, frame_color=color.gray)
+    biasTxt  = longTrig ? "LONG  (1A ~97%)" : shortTrig ? "SHORT (1B ~97%)" : "no trigger"
+    biasCol  = longTrig ? color.new(color.green, 0) : shortTrig ? color.new(color.red, 0) : color.new(color.gray, 0)
+    sizeTxt  = na(ibRangePct) ? "—" : huge ? "huge/rotation" : large ? "large" : small ? "small" : "mid"
+    firstTxt = not ibClosed ? "—" : lowFirst ? "low first" : highFirst ? "high first" : "tie"
+    posTxt   = na(closePos) ? "—" : topClose ? "top 25%" : botClose ? "bottom 25%" : "middle"
+    clockTxt = not ibClosed ? "pre-10:30" : afterNoon ? "after 12:00 (fade risk)" : "before 12:00 (trust)"
+
+    table.cell(t, 0, 0, "YM IB — 10:30 read", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(t, 1, 0, "value",              text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(t, 0, 1, "IB range %",   text_size=size.small), table.cell(t, 1, 1, na(ibRangePct) ? "—" : str.tostring(ibRangePct, "#.##") + "%", text_size=size.small)
+    table.cell(t, 0, 2, "IB size",      text_size=size.small), table.cell(t, 1, 2, sizeTxt,  text_size=size.small)
+    table.cell(t, 0, 3, "formed first", text_size=size.small), table.cell(t, 1, 3, firstTxt, text_size=size.small)
+    table.cell(t, 0, 4, "close in IB",  text_size=size.small), table.cell(t, 1, 4, posTxt,   text_size=size.small)
+    table.cell(t, 0, 5, "IB candle",    text_size=size.small), table.cell(t, 1, 5, not ibClosed ? "—" : ibGreen ? "green" : "red", text_size=size.small)
+    table.cell(t, 0, 6, "clock",        text_size=size.small), table.cell(t, 1, 6, clockTxt, text_size=size.small)
+    table.cell(t, 0, 7, "bias",         text_size=size.small), table.cell(t, 1, 7, biasTxt, text_color=color.white, bgcolor=biasCol, text_size=size.small)
+    table.cell(t, 0, 8, "position",     text_size=size.small), table.cell(t, 1, 8, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_size=size.small)
+
+// ------------------------------- Alerts --------------------------------------
+alertcondition(ibJustClosed and longTrig,  "IB Long Trigger (1A)",  "YM IB 1A: low formed first + top-quartile close -> long, target IB-high break")
+alertcondition(ibJustClosed and shortTrig, "IB Short Trigger (1B)", "YM IB 1B: high formed first + bottom-quartile close -> short, target IB-low break")
