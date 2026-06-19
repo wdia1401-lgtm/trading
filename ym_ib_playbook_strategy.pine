@@ -1,31 +1,20 @@
 //@version=6
 // =============================================================================
-//  YM INITIAL BALANCE PLAYBOOK  — strategy implementation
+//  YM INITIAL BALANCE PLAYBOOK  — strategy implementation (FIXED - TABLE DATA)
 //  Source: edgeful "full IB playbook on YM" (5 rules, 128 NY sessions,
 //          12/08/25 – 06/08/26). For educational purposes only.
 //
 //  Designed for:  YM (E-mini Dow) futures, 5-minute chart, NY session.
 //  IB = first hour, 09:30–10:30 ET. Breakouts measured on a wick touch.
-//
-//  The playbook's edge is knowing the likely break direction AT 10:30, before
-//  the break happens, then letting the clock (Rule 3) and the extension levels
-//  (Rules 4–5) decide whether to hold to the bell or scalp.
-//
-//  Rule map (see README):
-//   R1  10:30 direction trigger  -> which side breaks first  (entry signal)
-//   R2  day color                -> green/red day            (runner-hold)
-//   R3  the clock                -> early break holds, late break fades (filter)
-//   R4  extension targets        -> how far it travels        (profit target)
-//   R5  close location           -> hold-vs-scalp decision    (trade mgmt)
 // =============================================================================
 
-strategy("YM Initial Balance Playbook", "YM IB Playbook", overlay=true,
+strategy("YM IB Playbook (FIXED)", "YM IB", overlay=true,
      default_qty_type=strategy.fixed, default_qty_value=1,
      initial_capital=25000, pyramiding=0, calc_on_every_tick=false,
      commission_type=strategy.commission.cash_per_order, commission_value=2.0,
      slippage=1)
 
-// ------------------------------- Inputs --------------------------------------
+// ================================ INPUTS ====================================
 grpSess  = "Session / Initial Balance"
 ibSess   = input.session("0930-1030", "IB window (first hour)", group=grpSess)
 rthSess  = input.session("0930-1600", "Regular session", group=grpSess)
@@ -59,14 +48,14 @@ showTable  = input.bool(true, "Show 10:30 checklist table", group=grpViz)
 grpDebug     = "Diagnostics"
 debugEveryIB = input.bool(false, "DEBUG: take a long on EVERY IB close (ignore all filters)", group=grpDebug)
 
-// --------------------------- Session detection -------------------------------
+// ======================== SESSION DETECTION ==================================
 inIB   = not na(time(timeframe.period, ibSess,  tz))
 inRTH  = not na(time(timeframe.period, rthSess, tz))
 hourNY = hour(time, tz)
 afterNoon = hourNY >= noonHour
 afterPM   = hourNY >= pmHour
 
-// ------------------------------- State ---------------------------------------
+// ================================ STATE ======================================
 var float ibHigh         = na
 var float ibLow          = na
 var float ibOpen         = na
@@ -79,14 +68,32 @@ var bool  ibClosed       = false
 var bool  orderPlaced    = false
 var bool  ext05Hit       = false
 var bool  runnerActive   = false
-var int   sideTaken      = 0      //  1 long, -1 short, 0 none
+var int   sideTaken      = 0
 var float lvlStop        = na
 var float lvlTarget      = na
 var float lvlExt05       = na
-var int   trigCount      = 0      // diagnostics: Rule 1 triggers over loaded data
-var int   entryCount     = 0      // diagnostics: entries actually submitted
+var int   trigCount      = 0
+var int   entryCount     = 0
 
-// ------------------- Build the Initial Balance, track order ------------------
+// === SNAPSHOT VARIABLES: capture the IB state WHEN IT CLOSES for display ===
+var float snapIbHigh      = na
+var float snapIbLow       = na
+var float snapIbRange     = na
+var float snapIbRangePct  = na
+var float snapClosePos    = na
+var int   snapIbBars      = 0
+var bool  snapLowFirst    = false
+var bool  snapHighFirst   = false
+var bool  snapTopClose    = false
+var bool  snapBotClose    = false
+var bool  snapIbGreen     = false
+var bool  snapSmall       = false
+var bool  snapLarge       = false
+var bool  snapHuge        = false
+var bool  snapLongTrig    = false
+var bool  snapShortTrig   = false
+
+// ==================== BUILD INITIAL BALANCE ================================
 newDay = inIB and not inIB[1]
 if newDay
     ibHigh         := high
@@ -115,13 +122,53 @@ else if inIB
     ibBars         += 1
     ibRunningClose := close
 
-// IB closes on the first bar after 10:30
+// Capture IB close on transition OUT of IB window
 ibJustClosed = inIB[1] and not inIB
 if ibJustClosed and not ibClosed
     ibClose  := ibRunningClose
     ibClosed := true
+    
+    // === SNAPSHOT THE STATE AT THIS EXACT MOMENT ===
+    ibRange    = ibHigh - ibLow
+    ibRangePct = ibRange / ibClose * 100.0
+    closePos   = ibRange > 0 ? (ibClose - ibLow) / ibRange : na
+    lowFirst   = ibLowT < ibHighT
+    highFirst  = ibHighT < ibLowT
+    topClose   = closePos >= (1.0 - quartile)
+    botClose   = closePos <= quartile
+    ibGreen    = ibClose > ibOpen
+    small      = ibRangePct < smallPct
+    large      = ibRangePct > largePct
+    huge       = ibRangePct > hugePct
+    longTrig   = lowFirst and topClose
+    shortTrig  = highFirst and botClose
+    
+    // SAVE SNAPSHOT
+    snapIbHigh     := ibHigh
+    snapIbLow      := ibLow
+    snapIbRange    := ibRange
+    snapIbRangePct := ibRangePct
+    snapClosePos   := closePos
+    snapIbBars     := ibBars
+    snapLowFirst   := lowFirst
+    snapHighFirst  := highFirst
+    snapTopClose   := topClose
+    snapBotClose   := botClose
+    snapIbGreen    := ibGreen
+    snapSmall      := small
+    snapLarge      := large
+    snapHuge       := huge
+    snapLongTrig   := longTrig
+    snapShortTrig  := shortTrig
+    
+    // Count triggers
+    if longTrig
+        trigCount += 1
+    if shortTrig
+        trigCount += 1
 
-// --------------------------- Derived conditions ------------------------------
+// ========================= DERIVED CONDITIONS ================================
+// (These are recalculated every bar but used for logic; snapshots are for display)
 ibRange    = ibHigh - ibLow
 ibRangePct = na(ibClose) ? na : ibRange / ibClose * 100.0
 closePos   = ibRange > 0 and not na(ibClose) ? (ibClose - ibLow) / ibRange : na
@@ -136,59 +183,53 @@ small = not na(ibRangePct) and ibRangePct < smallPct
 large = not na(ibRangePct) and ibRangePct > largePct
 huge  = not na(ibRangePct) and ibRangePct > hugePct
 
-// Rule 1 triggers (knowable at 10:30, before any break)
-longTrig  = ibClosed and lowFirst  and topClose
+longTrig  = ibClosed and lowFirst and topClose
 shortTrig = ibClosed and highFirst and botClose
 
-// ------------------------------- Entries -------------------------------------
+// ============================== ENTRIES ======================================
 rotationBlock = skipRotation and huge
-canLong       = longTrig  and tradeLongs  and not rotationBlock and not debugEveryIB
+canLong       = longTrig and tradeLongs and not rotationBlock and not debugEveryIB
 canShort      = shortTrig and tradeShorts and not rotationBlock and not debugEveryIB
 anticipation  = entryMode == "Anticipation (Rule 1)"
 
-// Target sizing (Rule 4): small IB tends to reach 0.5x, larger IBs travel further
+// Target sizing (Rule 4)
 tgtMult     = adaptiveTargets ? (small ? 0.5 : 1.0) : targetMult
-longTarget  = ibHigh + tgtMult  * ibRange
-shortTarget = ibLow  - tgtMult  * ibRange
+longTarget  = ibHigh + tgtMult * ibRange
+shortTarget = ibLow - tgtMult * ibRange
 longExt05   = ibHigh + ext05Mult * ibRange
-shortExt05  = ibLow  - ext05Mult * ibRange
+shortExt05  = ibLow - ext05Mult * ibRange
 
 fireEntry = ibJustClosed and not orderPlaced
 
-// Diagnostics: count raw Rule 1 triggers (independent of rotation/long-short toggles)
-if ibJustClosed and longTrig
-    trigCount += 1
-if ibJustClosed and shortTrig
-    trigCount += 1
-
+// LONG ENTRY
 if fireEntry and canLong
     orderPlaced  := true
     sideTaken    := 1
     lvlStop      := ibLow
     lvlTarget    := longTarget
     lvlExt05     := longExt05
-    runnerActive := ibGreen and large                  // Rule 2B runner
+    runnerActive := ibGreen and large
     entryCount   += 1
     if anticipation
-        strategy.entry("Long", strategy.long)          // enter inside the IB at 10:30
+        strategy.entry("Long", strategy.long)
     else
-        strategy.entry("Long", strategy.long, stop=ibHigh)  // wait for the actual break
+        strategy.entry("Long", strategy.long, stop=ibHigh)
 
+// SHORT ENTRY
 if fireEntry and canShort
     orderPlaced  := true
     sideTaken    := -1
     lvlStop      := ibHigh
     lvlTarget    := shortTarget
     lvlExt05     := shortExt05
-    runnerActive := (not ibGreen) and large            // Rule 2C red runner
+    runnerActive := (not ibGreen) and large
     entryCount   += 1
     if anticipation
         strategy.entry("Short", strategy.short)
     else
         strategy.entry("Short", strategy.short, stop=ibLow)
 
-// DEBUG: ignore every filter and just buy at each IB close. If THIS produces no
-// trades, the IB/session is not being detected on your data — not a filter issue.
+// DEBUG: force entry on every IB close
 if debugEveryIB and fireEntry
     orderPlaced  := true
     sideTaken    := 1
@@ -199,30 +240,30 @@ if debugEveryIB and fireEntry
     entryCount   += 1
     strategy.entry("Long", strategy.long)
 
-// Rule 3: late breaks fade — kill an unfilled breakout order after the noon cutoff
+// Rule 3: cancel unfilled breakout orders after noon
 if not anticipation and afterNoon and strategy.position_size == 0 and orderPlaced
     strategy.cancel("Long")
     strategy.cancel("Short")
 
-// ---------------------- Track the first extension (Rule 5) -------------------
+// ==================== TRACK EXTENSION HITS (RULE 5) ==========================
 if strategy.position_size > 0 and high >= lvlExt05
     ext05Hit := true
 if strategy.position_size < 0 and low <= lvlExt05
     ext05Hit := true
 
-// ------------------------------- Exits ---------------------------------------
-// Bracket: stop on the opposite IB side (Rule 3A "statistically safe stop"),
-// limit at the extension target. Runner days drop the limit and ride to the bell.
+// ================================= EXITS =====================================
 if strategy.position_size > 0
     longLimit = (runnerActive and holdRunners) ? na : lvlTarget
     strategy.exit("L-exit", from_entry="Long", stop=lvlStop, limit=longLimit)
+
 if strategy.position_size < 0
     shortLimit = (runnerActive and holdRunners) ? na : lvlTarget
     strategy.exit("S-exit", from_entry="Short", stop=lvlStop, limit=shortLimit)
 
-// Rule 5: extension never printed by the afternoon -> scalp it back inside.
+// Rule 5: scalp out in PM if extension never hit
 pmScalp = scalpNoExt and afterPM and not ext05Hit and not (runnerActive and holdRunners)
-// End of regular session -> flatten everything (these are day-trade setups).
+
+// End of session: flatten everything
 sessionEnding = inRTH[1] and not inRTH
 
 if strategy.position_size != 0
@@ -230,80 +271,77 @@ if strategy.position_size != 0
         strategy.close_all(comment="EOD flat")
     else if pmScalp
         strategy.close_all(comment="PM scalp (no ext)")
+
 if sessionEnding
     strategy.cancel_all()
 
-// ------------------------------- Visuals -------------------------------------
+// ============================== VISUALS ======================================
 showLine = showLevels and ibClosed and inRTH
-plot(showLine ? ibHigh : na,                    "IB High", color.teal,             2, plot.style_linebr)
-plot(showLine ? ibLow  : na,                    "IB Low",  color.red,              2, plot.style_linebr)
+plot(showLine ? ibHigh : na, "IB High", color.teal, 2, plot.style_linebr)
+plot(showLine ? ibLow : na, "IB Low", color.red, 2, plot.style_linebr)
 plot(showLine ? ibHigh + ext05Mult * ibRange : na, "+0.5x", color.new(color.teal, 55), 1, plot.style_linebr)
-plot(showLine ? ibLow  - ext05Mult * ibRange : na, "-0.5x", color.new(color.red,  55), 1, plot.style_linebr)
-plot(showLine ? ibHigh + ibRange : na,          "+1.0x",   color.new(color.teal, 72), 1, plot.style_linebr)
-plot(showLine ? ibLow  - ibRange : na,          "-1.0x",   color.new(color.red,  72), 1, plot.style_linebr)
+plot(showLine ? ibLow - ext05Mult * ibRange : na, "-0.5x", color.new(color.red, 55), 1, plot.style_linebr)
+plot(showLine ? ibHigh + ibRange : na, "+1.0x", color.new(color.teal, 72), 1, plot.style_linebr)
+plot(showLine ? ibLow - ibRange : na, "-1.0x", color.new(color.red, 72), 1, plot.style_linebr)
 bgcolor(inIB ? color.new(color.blue, 92) : na, title="IB window")
 
-// Trigger markers — show on the 10:30 bar whenever Rule 1 fires, even if no
-// entry results (rotation skip / toggle off). If you NEVER see these, the
-// loaded history has no qualifying sessions (load more bars / use 5-min).
-plotshape(ibJustClosed and longTrig,  "Long trigger 1A",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
-plotshape(ibJustClosed and shortTrig, "Short trigger 1B", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+// Trigger markers
+plotshape(ibJustClosed and snapLongTrig, "Long trigger 1A", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(ibJustClosed and snapShortTrig, "Short trigger 1B", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
 
-// --------------------------- Timeframe guard ---------------------------------
-// The 'formed first' logic (Rule 1) needs the first hour split into several
-// bars. On a >=30-min / non-intraday chart the IB collapses to ~1 bar, the
-// high/low share a timestamp, no trigger can ever fire, and you get 0 trades.
-// The playbook's stats were measured on 5-minute candles — use that.
+// ========================= TIMEFRAME GUARD ==================================
 tfTooCoarse = (not timeframe.isintraday) or (timeframe.in_seconds() > 900)
 var label warnLbl = na
 if barstate.islast
     label.delete(warnLbl)
     if tfTooCoarse or (ibClosed and ibBars <= 2)
         warnLbl := label.new(bar_index, high,
-             "⚠ Timeframe too coarse for the IB 'formed-first' logic.\n" +
-             "Switch to a 5-minute chart (the playbook's setting) or this\n" +
-             "strategy can never fire a Rule 1 trigger.",
+             "⚠ CRITICAL: Use 5-minute chart.\n" +
+             "This playbook requires intraday ≤ 5-min.\n" +
+             "Current TF is too coarse — 0 triggers possible.",
              style=label.style_label_down, color=color.orange,
              textcolor=color.black, size=size.normal)
 
-// ----------------------------- Checklist table -------------------------------
+// ========================= CHECKLIST TABLE ==================================
 if showTable and barstate.islast
     var table t = table.new(position.top_right, 2, 12, border_width=1, frame_width=1, frame_color=color.gray)
-    biasTxt  = longTrig ? "LONG  (1A ~97%)" : shortTrig ? "SHORT (1B ~97%)" : "no trigger"
-    biasCol  = longTrig ? color.new(color.green, 0) : shortTrig ? color.new(color.red, 0) : color.new(color.gray, 0)
-    sizeTxt  = na(ibRangePct) ? "—" : huge ? "huge/rotation" : large ? "large" : small ? "small" : "mid"
-    firstTxt = not ibClosed ? "—" : lowFirst ? "low first" : highFirst ? "high first" : "tie"
-    posTxt   = na(closePos) ? "—" : topClose ? "top 25%" : botClose ? "bottom 25%" : "middle"
-    clockTxt = not ibClosed ? "pre-10:30" : afterNoon ? "after 12:00 (fade risk)" : "before 12:00 (trust)"
-    posState = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat"
-    rangePctTxt = na(ibRangePct) ? "—" : str.tostring(ibRangePct, "#.##") + "%"
-    candleTxt = not ibClosed ? "—" : ibGreen ? "green" : "red"
+    
+    // USE SNAPSHOT DATA (frozen from when IB closed)
+    biasTxt  = snapLongTrig ? "LONG  (1A)" : snapShortTrig ? "SHORT (1B)" : "—"
+    biasCol  = snapLongTrig ? color.new(color.green, 0) : snapShortTrig ? color.new(color.red, 0) : color.new(color.gray, 50)
+    sizeTxt  = na(snapIbRangePct) ? "—" : snapHuge ? "HUGE" : snapLarge ? "LARGE" : snapSmall ? "SMALL" : "MID"
+    firstTxt = snapIbBars == 0 ? "—" : snapLowFirst ? "LOW ↓" : snapHighFirst ? "HIGH ↑" : "tie"
+    posTxt   = na(snapClosePos) ? "—" : snapTopClose ? "TOP" : snapBotClose ? "BOTTOM" : "MID"
+    clockTxt = snapIbBars == 0 ? "pre-10:30" : afterNoon ? "AFTER NOON ⚠" : "early ✓"
+    posState = strategy.position_size > 0 ? "LONG +" : strategy.position_size < 0 ? "SHORT -" : "FLAT"
+    rangePctTxt = na(snapIbRangePct) ? "—" : str.tostring(snapIbRangePct, "#.##") + "%"
+    candleTxt = snapIbBars == 0 ? "—" : snapIbGreen ? "GREEN" : "RED"
 
-    table.cell(t, 0, 0, "YM IB — 10:30 read", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
-    table.cell(t, 1, 0, "value", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(t, 0, 0, "YM IB — 10:30 Read", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(t, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
     table.cell(t, 0, 1, "IB bars", text_size=size.small)
-    table.cell(t, 1, 1, str.tostring(ibBars), text_color=(ibBars <= 2 ? color.orange : color.gray), text_size=size.small)
-    table.cell(t, 0, 2, "IB range %", text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(snapIbBars), text_color=(snapIbBars <= 2 ? color.orange : color.gray), text_size=size.small)
+    table.cell(t, 0, 2, "Range %", text_size=size.small)
     table.cell(t, 1, 2, rangePctTxt, text_size=size.small)
-    table.cell(t, 0, 3, "IB size", text_size=size.small)
+    table.cell(t, 0, 3, "Size", text_size=size.small)
     table.cell(t, 1, 3, sizeTxt, text_size=size.small)
-    table.cell(t, 0, 4, "formed first", text_size=size.small)
+    table.cell(t, 0, 4, "Formed first", text_size=size.small)
     table.cell(t, 1, 4, firstTxt, text_size=size.small)
-    table.cell(t, 0, 5, "close in IB", text_size=size.small)
+    table.cell(t, 0, 5, "Close pos", text_size=size.small)
     table.cell(t, 1, 5, posTxt, text_size=size.small)
-    table.cell(t, 0, 6, "IB candle", text_size=size.small)
+    table.cell(t, 0, 6, "IB color", text_size=size.small)
     table.cell(t, 1, 6, candleTxt, text_size=size.small)
-    table.cell(t, 0, 7, "clock", text_size=size.small)
+    table.cell(t, 0, 7, "Clock", text_size=size.small)
     table.cell(t, 1, 7, clockTxt, text_size=size.small)
-    table.cell(t, 0, 8, "bias", text_size=size.small)
+    table.cell(t, 0, 8, "Bias", text_size=size.small)
     table.cell(t, 1, 8, biasTxt, text_color=color.white, bgcolor=biasCol, text_size=size.small)
-    table.cell(t, 0, 9, "position", text_size=size.small)
-    table.cell(t, 1, 9, posState, text_size=size.small)
-    table.cell(t, 0, 10, "triggers (loaded)", text_size=size.small)
+    table.cell(t, 0, 9, "Position", text_size=size.small)
+    table.cell(t, 1, 9, posState, text_color=(strategy.position_size != 0 ? (strategy.position_size > 0 ? color.green : color.red) : color.gray), text_size=size.small)
+    table.cell(t, 0, 10, "Triggers", text_size=size.small)
     table.cell(t, 1, 10, str.tostring(trigCount), text_color=(trigCount == 0 ? color.orange : color.gray), text_size=size.small)
-    table.cell(t, 0, 11, "entries taken", text_size=size.small)
+    table.cell(t, 0, 11, "Entries", text_size=size.small)
     table.cell(t, 1, 11, str.tostring(entryCount), text_color=(entryCount == 0 ? color.orange : color.gray), text_size=size.small)
 
-// ------------------------------- Alerts --------------------------------------
-alertcondition(ibJustClosed and longTrig,  "IB Long Trigger (1A)",  "YM IB 1A: low formed first + top-quartile close -> long, target IB-high break")
-alertcondition(ibJustClosed and shortTrig, "IB Short Trigger (1B)", "YM IB 1B: high formed first + bottom-quartile close -> short, target IB-low break")
+// ============================== ALERTS =======================================
+alertcondition(ibJustClosed and snapLongTrig, "IB Long Trigger (1A)", "YM IB 1A fired: low formed first + top quartile close")
+alertcondition(ibJustClosed and snapShortTrig, "IB Short Trigger (1B)", "YM IB 1B fired: high formed first + bottom quartile close")
