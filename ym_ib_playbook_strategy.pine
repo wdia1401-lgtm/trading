@@ -71,6 +71,7 @@ var float ibRunningClose = na
 var float ibClose        = na
 var int   ibHighT        = na
 var int   ibLowT         = na
+var int   ibBars         = 0
 var bool  ibClosed       = false
 var bool  orderPlaced    = false
 var bool  ext05Hit       = false
@@ -88,6 +89,7 @@ if newDay
     ibOpen         := open
     ibHighT        := time
     ibLowT         := time
+    ibBars         := 1
     ibRunningClose := close
     ibClose        := na
     ibClosed       := false
@@ -105,6 +107,7 @@ else if inIB
     if low < ibLow
         ibLow  := low
         ibLowT := time
+    ibBars         += 1
     ibRunningClose := close
 
 // IB closes on the first bar after 10:30
@@ -215,27 +218,56 @@ plot(showLine ? ibHigh + ibRange : na,          "+1.0x",   color.new(color.teal,
 plot(showLine ? ibLow  - ibRange : na,          "-1.0x",   color.new(color.red,  72), 1, plot.style_linebr)
 bgcolor(inIB ? color.new(color.blue, 92) : na, title="IB window")
 
+// --------------------------- Timeframe guard ---------------------------------
+// The 'formed first' logic (Rule 1) needs the first hour split into several
+// bars. On a >=30-min / non-intraday chart the IB collapses to ~1 bar, the
+// high/low share a timestamp, no trigger can ever fire, and you get 0 trades.
+// The playbook's stats were measured on 5-minute candles — use that.
+tfTooCoarse = (not timeframe.isintraday) or (timeframe.in_seconds() > 900)
+var label warnLbl = na
+if barstate.islast
+    label.delete(warnLbl)
+    if tfTooCoarse or (ibClosed and ibBars <= 2)
+        warnLbl := label.new(bar_index, high,
+             "⚠ Timeframe too coarse for the IB 'formed-first' logic.\n" +
+             "Switch to a 5-minute chart (the playbook's setting) or this\n" +
+             "strategy can never fire a Rule 1 trigger.",
+             style=label.style_label_down, color=color.orange,
+             textcolor=color.black, size=size.normal)
+
 // ----------------------------- Checklist table -------------------------------
-f_yesno(b) => b ? "yes" : "no"
 if showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 9, border_width=1, frame_width=1, frame_color=color.gray)
+    var table t = table.new(position.top_right, 2, 10, border_width=1, frame_width=1, frame_color=color.gray)
     biasTxt  = longTrig ? "LONG  (1A ~97%)" : shortTrig ? "SHORT (1B ~97%)" : "no trigger"
     biasCol  = longTrig ? color.new(color.green, 0) : shortTrig ? color.new(color.red, 0) : color.new(color.gray, 0)
     sizeTxt  = na(ibRangePct) ? "—" : huge ? "huge/rotation" : large ? "large" : small ? "small" : "mid"
     firstTxt = not ibClosed ? "—" : lowFirst ? "low first" : highFirst ? "high first" : "tie"
     posTxt   = na(closePos) ? "—" : topClose ? "top 25%" : botClose ? "bottom 25%" : "middle"
     clockTxt = not ibClosed ? "pre-10:30" : afterNoon ? "after 12:00 (fade risk)" : "before 12:00 (trust)"
+    posState = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat"
+    rangePctTxt = na(ibRangePct) ? "—" : str.tostring(ibRangePct, "#.##") + "%"
+    candleTxt = not ibClosed ? "—" : ibGreen ? "green" : "red"
 
     table.cell(t, 0, 0, "YM IB — 10:30 read", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
-    table.cell(t, 1, 0, "value",              text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
-    table.cell(t, 0, 1, "IB range %",   text_size=size.small), table.cell(t, 1, 1, na(ibRangePct) ? "—" : str.tostring(ibRangePct, "#.##") + "%", text_size=size.small)
-    table.cell(t, 0, 2, "IB size",      text_size=size.small), table.cell(t, 1, 2, sizeTxt,  text_size=size.small)
-    table.cell(t, 0, 3, "formed first", text_size=size.small), table.cell(t, 1, 3, firstTxt, text_size=size.small)
-    table.cell(t, 0, 4, "close in IB",  text_size=size.small), table.cell(t, 1, 4, posTxt,   text_size=size.small)
-    table.cell(t, 0, 5, "IB candle",    text_size=size.small), table.cell(t, 1, 5, not ibClosed ? "—" : ibGreen ? "green" : "red", text_size=size.small)
-    table.cell(t, 0, 6, "clock",        text_size=size.small), table.cell(t, 1, 6, clockTxt, text_size=size.small)
-    table.cell(t, 0, 7, "bias",         text_size=size.small), table.cell(t, 1, 7, biasTxt, text_color=color.white, bgcolor=biasCol, text_size=size.small)
-    table.cell(t, 0, 8, "position",     text_size=size.small), table.cell(t, 1, 8, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_size=size.small)
+    table.cell(t, 1, 0, "value", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.small)
+    table.cell(t, 0, 1, "IB bars", text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(ibBars), text_color=(ibBars <= 2 ? color.orange : color.gray), text_size=size.small)
+    table.cell(t, 0, 2, "IB range %", text_size=size.small)
+    table.cell(t, 1, 2, rangePctTxt, text_size=size.small)
+    table.cell(t, 0, 3, "IB size", text_size=size.small)
+    table.cell(t, 1, 3, sizeTxt, text_size=size.small)
+    table.cell(t, 0, 4, "formed first", text_size=size.small)
+    table.cell(t, 1, 4, firstTxt, text_size=size.small)
+    table.cell(t, 0, 5, "close in IB", text_size=size.small)
+    table.cell(t, 1, 5, posTxt, text_size=size.small)
+    table.cell(t, 0, 6, "IB candle", text_size=size.small)
+    table.cell(t, 1, 6, candleTxt, text_size=size.small)
+    table.cell(t, 0, 7, "clock", text_size=size.small)
+    table.cell(t, 1, 7, clockTxt, text_size=size.small)
+    table.cell(t, 0, 8, "bias", text_size=size.small)
+    table.cell(t, 1, 8, biasTxt, text_color=color.white, bgcolor=biasCol, text_size=size.small)
+    table.cell(t, 0, 9, "position", text_size=size.small)
+    table.cell(t, 1, 9, posState, text_size=size.small)
 
 // ------------------------------- Alerts --------------------------------------
 alertcondition(ibJustClosed and longTrig,  "IB Long Trigger (1A)",  "YM IB 1A: low formed first + top-quartile close -> long, target IB-high break")
