@@ -80,6 +80,8 @@ var int   sideTaken      = 0      //  1 long, -1 short, 0 none
 var float lvlStop        = na
 var float lvlTarget      = na
 var float lvlExt05       = na
+var int   trigCount      = 0      // diagnostics: Rule 1 triggers over loaded data
+var int   entryCount     = 0      // diagnostics: entries actually submitted
 
 // ------------------- Build the Initial Balance, track order ------------------
 newDay = inIB and not inIB[1]
@@ -150,6 +152,12 @@ shortExt05  = ibLow  - ext05Mult * ibRange
 
 fireEntry = ibJustClosed and not orderPlaced
 
+// Diagnostics: count raw Rule 1 triggers (independent of rotation/long-short toggles)
+if ibJustClosed and longTrig
+    trigCount += 1
+if ibJustClosed and shortTrig
+    trigCount += 1
+
 if fireEntry and canLong
     orderPlaced  := true
     sideTaken    := 1
@@ -157,6 +165,7 @@ if fireEntry and canLong
     lvlTarget    := longTarget
     lvlExt05     := longExt05
     runnerActive := ibGreen and large                  // Rule 2B runner
+    entryCount   += 1
     if anticipation
         strategy.entry("Long", strategy.long)          // enter inside the IB at 10:30
     else
@@ -169,6 +178,7 @@ if fireEntry and canShort
     lvlTarget    := shortTarget
     lvlExt05     := shortExt05
     runnerActive := (not ibGreen) and large            // Rule 2C red runner
+    entryCount   += 1
     if anticipation
         strategy.entry("Short", strategy.short)
     else
@@ -218,6 +228,12 @@ plot(showLine ? ibHigh + ibRange : na,          "+1.0x",   color.new(color.teal,
 plot(showLine ? ibLow  - ibRange : na,          "-1.0x",   color.new(color.red,  72), 1, plot.style_linebr)
 bgcolor(inIB ? color.new(color.blue, 92) : na, title="IB window")
 
+// Trigger markers — show on the 10:30 bar whenever Rule 1 fires, even if no
+// entry results (rotation skip / toggle off). If you NEVER see these, the
+// loaded history has no qualifying sessions (load more bars / use 5-min).
+plotshape(ibJustClosed and longTrig,  "Long trigger 1A",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(ibJustClosed and shortTrig, "Short trigger 1B", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+
 // --------------------------- Timeframe guard ---------------------------------
 // The 'formed first' logic (Rule 1) needs the first hour split into several
 // bars. On a >=30-min / non-intraday chart the IB collapses to ~1 bar, the
@@ -237,7 +253,7 @@ if barstate.islast
 
 // ----------------------------- Checklist table -------------------------------
 if showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 10, border_width=1, frame_width=1, frame_color=color.gray)
+    var table t = table.new(position.top_right, 2, 12, border_width=1, frame_width=1, frame_color=color.gray)
     biasTxt  = longTrig ? "LONG  (1A ~97%)" : shortTrig ? "SHORT (1B ~97%)" : "no trigger"
     biasCol  = longTrig ? color.new(color.green, 0) : shortTrig ? color.new(color.red, 0) : color.new(color.gray, 0)
     sizeTxt  = na(ibRangePct) ? "—" : huge ? "huge/rotation" : large ? "large" : small ? "small" : "mid"
@@ -268,6 +284,10 @@ if showTable and barstate.islast
     table.cell(t, 1, 8, biasTxt, text_color=color.white, bgcolor=biasCol, text_size=size.small)
     table.cell(t, 0, 9, "position", text_size=size.small)
     table.cell(t, 1, 9, posState, text_size=size.small)
+    table.cell(t, 0, 10, "triggers (loaded)", text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(trigCount), text_color=(trigCount == 0 ? color.orange : color.gray), text_size=size.small)
+    table.cell(t, 0, 11, "entries taken", text_size=size.small)
+    table.cell(t, 1, 11, str.tostring(entryCount), text_color=(entryCount == 0 ? color.orange : color.gray), text_size=size.small)
 
 // ------------------------------- Alerts --------------------------------------
 alertcondition(ibJustClosed and longTrig,  "IB Long Trigger (1A)",  "YM IB 1A: low formed first + top-quartile close -> long, target IB-high break")
