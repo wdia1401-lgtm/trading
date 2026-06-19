@@ -56,6 +56,9 @@ grpViz     = "Visuals"
 showLevels = input.bool(true, "Show IB & extension levels", group=grpViz)
 showTable  = input.bool(true, "Show 10:30 checklist table", group=grpViz)
 
+grpDebug     = "Diagnostics"
+debugEveryIB = input.bool(false, "DEBUG: take a long on EVERY IB close (ignore all filters)", group=grpDebug)
+
 // --------------------------- Session detection -------------------------------
 inIB   = not na(time(timeframe.period, ibSess,  tz))
 inRTH  = not na(time(timeframe.period, rthSess, tz))
@@ -139,8 +142,8 @@ shortTrig = ibClosed and highFirst and botClose
 
 // ------------------------------- Entries -------------------------------------
 rotationBlock = skipRotation and huge
-canLong       = longTrig  and tradeLongs  and not rotationBlock
-canShort      = shortTrig and tradeShorts and not rotationBlock
+canLong       = longTrig  and tradeLongs  and not rotationBlock and not debugEveryIB
+canShort      = shortTrig and tradeShorts and not rotationBlock and not debugEveryIB
 anticipation  = entryMode == "Anticipation (Rule 1)"
 
 // Target sizing (Rule 4): small IB tends to reach 0.5x, larger IBs travel further
@@ -183,6 +186,18 @@ if fireEntry and canShort
         strategy.entry("Short", strategy.short)
     else
         strategy.entry("Short", strategy.short, stop=ibLow)
+
+// DEBUG: ignore every filter and just buy at each IB close. If THIS produces no
+// trades, the IB/session is not being detected on your data — not a filter issue.
+if debugEveryIB and fireEntry
+    orderPlaced  := true
+    sideTaken    := 1
+    lvlStop      := ibLow
+    lvlTarget    := longTarget
+    lvlExt05     := longExt05
+    runnerActive := false
+    entryCount   += 1
+    strategy.entry("Long", strategy.long)
 
 // Rule 3: late breaks fade — kill an unfilled breakout order after the noon cutoff
 if not anticipation and afterNoon and strategy.position_size == 0 and orderPlaced
