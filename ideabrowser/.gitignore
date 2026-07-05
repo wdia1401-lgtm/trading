@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+ideabrowser.db
+.pytest_cache/

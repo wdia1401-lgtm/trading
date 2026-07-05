@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IdeaBrowser Reimagined</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --line:#2c333d; --text:#e8eaed; --muted:#9aa4b0; --accent:#5eead4; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.55 system-ui, sans-serif; padding:24px; max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; letter-spacing:.02em; }
+  h1 span { color:var(--accent); }
+  nav { display:flex; gap:8px; margin:18px 0; }
+  nav button { background:var(--panel); color:var(--muted); border:1px solid var(--line); border-radius:8px; padding:8px 16px; cursor:pointer; font:inherit; }
+  nav button.active { color:var(--text); border-color:var(--accent); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:12px; }
+  .card h3 { font-size:16px; margin-bottom:4px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .score { float:right; font-weight:700; color:var(--accent); }
+  .pill { display:inline-block; border:1px solid var(--line); border-radius:99px; padding:1px 10px; font-size:12px; color:var(--muted); margin:2px 4px 2px 0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; margin:10px 0; }
+  .stat { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .stat b { display:block; font-size:18px; }
+  a.back { color:var(--accent); cursor:pointer; font-size:13px; }
+  ul { padding-left:20px; }
+  .clickable { cursor:pointer; }
+  .clickable:hover { border-color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+</style>
+</head>
+<body>
+<h1>Idea<span>Browser</span> Reimagined <span class="muted" id="backend"></span></h1>
+<nav>
+  <button data-tab="daily" class="active">Daily Idea</button>
+  <button data-tab="ideas">Idea Database</button>
+  <button data-tab="trends">Trends</button>
+  <button data-tab="adbooker">AdBooker</button>
+</nav>
+<main id="view">Loading…</main>
+
+<script>
+const api = p => fetch('/api/v1' + p).then(r => r.json());
+const view = document.getElementById('view');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const usd = c => '$' + (c / 100).toLocaleString();
+
+fetch('/health').then(r => r.json()).then(h =>
+  document.getElementById('backend').textContent = ' · AI backend: ' + h.ai_backend);
+
+function report(r) {
+  const i = r.idea, v = r.validation;
+  view.innerHTML = `
+    <a class="back" onclick="tabs.ideas()">&larr; all ideas</a>
+    <div class="card">
+      <h3>${esc(i.title)} <span class="score">${v ? v.overall_score : '—'}/100</span></h3>
+      <div class="muted">${esc(i.tagline)} · ${esc(i.category)} · verdict: <b>${esc(v?.verdict || 'n/a')}</b></div>
+      <div class="grid">${v ? Object.entries(v.dimensions).map(([k, s]) =>
+        `<div class="stat"><b>${s}</b><span class="muted">${esc(k.replaceAll('_',' '))}</span></div>`).join('') : ''}</div>
+      <p><b>Problem.</b> ${esc(i.problem_statement)}</p>
+      <p style="margin-top:8px"><b>Solution.</b> ${esc(i.solution_overview)}</p>
+      <p style="margin-top:8px"><b>Why now.</b> ${esc(i.why_now)}</p>
+      ${v ? `<p style="margin-top:8px"><b>Analyst note.</b> ${esc(v.narrative)}</p>` : ''}
+    </div>
+    ${r.frameworks.map(f => `<div class="card"><h3>${esc(f.framework.replaceAll('_',' '))}
+      <span class="score">${esc(f.classification)}</span></h3>
+      <div>${Object.entries(f.scores).map(([k, s]) => `<span class="pill">${esc(k)}: ${s}</span>`).join('')}</div>
+      <p class="muted" style="margin-top:6px">${esc(f.analysis)}</p>
+      <ul class="muted">${f.recommendations.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`).join('')}
+    <div class="card"><h3>Proof &amp; signals</h3>
+      ${r.signals.map(s => `<div class="muted">• [${esc(s.source)}] ${esc(s.title)} (strength ${s.strength})</div>`).join('') || '<span class="muted">none catalogued</span>'}
+      <div style="margin-top:8px">${r.keywords.map(k =>
+        `<span class="pill">${esc(k.term)} · ${k.monthly_volume.toLocaleString()}/mo · +${k.growth_pct_yoy}% YoY</span>`).join('')}</div></div>
+    <div class="card"><h3>Competitive landscape</h3>
+      ${r.competitors.map(c => `<div style="margin-bottom:6px"><b>${esc(c.name)}</b>
+        <span class="pill">${esc(c.kind)}</span><span class="pill">threat: ${esc(c.threat_level)}</span>
+        <div class="muted">${esc(c.positioning)}</div></div>`).join('') || '<span class="muted">none catalogued</span>'}</div>`;
+}
+
+const tabs = {
+  async daily() {
+    const r = await api('/ideas/daily');
+    report(r);
+    view.insertAdjacentHTML('afterbegin', '<div class="muted" style="margin-bottom:8px">Today\'s featured idea</div>');
+  },
+  async ideas() {
+    const ideas = await api('/ideas?limit=50');
+    view.innerHTML = ideas.map(i => `
+      <div class="card clickable" onclick="api('/ideas/${i.slug}').then(report)">
+        <h3>${esc(i.title)} <span class="score">${i.overall_score ?? '—'}</span></h3>
+        <div class="muted">${esc(i.tagline)} · ${esc(i.category)} · ${esc(i.verdict || '')}</div>
+      </div>`).join('') || 'No ideas yet — run <code>python -m app.seed</code>.';
+  },
+  async trends() {
+    const trends = await api('/trends');
+    view.innerHTML = trends.map(t => `
+      <div class="card"><h3>${esc(t.name)} <span class="score">${t.momentum}</span></h3>
+        <div class="muted">${esc(t.category)} · ${esc(t.stage)}</div>
+        <p class="muted">${esc(t.summary)}</p>
+        <div>${t.keywords.map(k => `<span class="pill">${esc(k)}</span>`).join('')}</div>
+      </div>`).join('') || 'No trends yet.';
+  },
+  async adbooker() {
+    const nls = await api('/adbooker/newsletters');
+    if (!nls.length) { view.innerHTML = 'No newsletters yet.'; return; }
+    const nl = nls[0];
+    const [dash, slots] = await Promise.all([
+      api(`/adbooker/newsletters/${nl.id}/dashboard`),
+      api(`/adbooker/newsletters/${nl.id}/slots?available_only=true`),
+    ]);
+    view.innerHTML = `
+      <div class="card"><h3>${esc(nl.name)}</h3>
+        <div class="muted">${esc(nl.description)}</div>
+        <div class="grid">
+          <div class="stat"><b>${dash.occupancy_rate * 100 | 0}%</b><span class="muted">occupancy</span></div>
+          <div class="stat"><b>${usd(dash.revenue_confirmed_cents)}</b><span class="muted">confirmed revenue</span></div>
+          <div class="stat"><b>${usd(dash.revenue_pending_cents)}</b><span class="muted">pending revenue</span></div>
+          <div class="stat"><b>${(dash.avg_ctr * 100).toFixed(2)}%</b><span class="muted">avg CTR</span></div>
+        </div>
+        <div class="muted">Upcoming: ${dash.upcoming_deliveries.map(d => `${esc(d.brand)} (${d.run_date})`).join(', ') || 'none'}</div>
+      </div>
+      <div class="card"><h3>Available slots (next 60 days)</h3>
+        <table><tr><th>Date</th><th>Placement</th><th>Price</th></tr>
+        ${slots.slice(0, 12).map(s => `<tr><td>${s.run_date}</td><td>${esc(s.placement_type.name)}</td><td>${usd(s.price_cents)}</td></tr>`).join('')}
+        </table>
+        <div class="muted" style="margin-top:6px">${slots.length} bookable slots · book via POST /api/v1/adbooker/slots/{id}/book</div>
+      </div>`;
+  },
+};
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  tabs[b.dataset.tab]();
+});
+tabs.daily();
+</script>
+</body>
+</html>
